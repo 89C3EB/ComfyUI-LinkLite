@@ -80,8 +80,8 @@ Single JS file, silent load, geometry cached (zero recompute when idle), idle rA
 | 速度 / 粗细 / 透明度 | 滑杆调节 |
 | 界面语言 Language | 自动 / 中文 / English |
 
-> **隐藏功能 · 速度突破上限**：速度滑杆用鼠标拖拽最高只能到 **3**；若想更快，把鼠标移到速度滑杆上，**按住鼠标中键并滚动滚轮**即可继续加速，最高到 **12**（滑杆旁的数值标签会变成橙色，提示已超出滑杆范围）。该值同样会自动保存。
-> **Hidden feature · Speed beyond the slider max**: dragging the Speed slider caps at **3**. To go faster, hover the slider, **hold the middle mouse button and scroll** — speed keeps increasing up to **12** (the value label turns orange). The value is saved as usual.
+> **隐藏功能 · 速度突破上限**：速度滑杆用鼠标拖拽最高只能到 **3**；若想更快，把鼠标移到速度滑杆上，**滚动滚轮**即可继续加速，最高到 **12**（滑杆会保持满格显示）。该值同样会自动保存。
+> **Hidden feature · Speed beyond the slider max**: dragging the Speed slider caps at **3**. To go faster, hover the slider and **scroll the wheel** — speed keeps increasing up to **12** (the slider stays at full). The value is saved as usual.
 
 ---
 
@@ -122,7 +122,7 @@ Single JS file, silent load, geometry cached (zero recompute when idle), idle rA
 
 ## Changelog
 
-- **V1**：适配 ComfyUI 0.3.x 渲染架构，修复空闲时特效卡顿/冻结（技术细节详见上方「兼容性 · 空闲推帧适配」）：新增 rAF 空闲推帧置脏（fg+bg）、`setDirty` 新方法名适配、`_links` Map 结构兼容、`g_liveCanvas` + `active_canvas` 真实画布跟踪、渲染循环保活；新增 `__LLDiag` / `__LLDBG` 诊断接口；新增速度隐藏上限（滑杆拖拽上限 3，滑杆上按住中键滚轮可继续加速至 12）。
+- **V1**：适配 ComfyUI 0.3.x 渲染架构，修复空闲时特效卡顿/冻结（技术细节详见上方「兼容性 · 空闲推帧适配」）：新增 rAF 空闲推帧置脏（fg+bg）、`setDirty` 新方法名适配、`_links` Map 结构兼容、`g_liveCanvas` + `active_canvas` 真实画布跟踪、渲染循环保活；新增 `__LLDiag` / `__LLDBG` 诊断接口；新增速度隐藏上限（滑杆拖拽上限 3，滑杆上滚动滚轮可继续加速至 12）。
 - **V0.1**：连线形态与动效改为 2 字命名（动效改名为「连线动效」）；新增弹性曲线、正交避让两种走线；箭头拖尾加长；移除「触发方式」；路径几何缓存 + 低 GPU/显存优化。
 - V0.x 之前为开发版迭代（形态/特效增减、发光渲染重构、绝对速度相位修复、翻页缓存修复等）。
 
