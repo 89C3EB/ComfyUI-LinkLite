@@ -4,7 +4,7 @@
 // 特效：水滴/流点/箭头/彩带/虚线/脉动/彗星/光环/流星/流光/波纹/光子（样本路径致密化，拐角同样生效）
 // 连线高光：勾选后，选中节点 → 下一个节点之间的连线加粗+2档、透明度+30%
 // 性能：路径几何缓存(静止帧零重算) + 空闲 rAF 推帧(16ms 节流置脏 fg+bg)，多工作流流畅、GPU/显存占用小
-// 隐藏功能：速度滑杆鼠标拖拽上限 3；在滑杆上按住鼠标中键滚动滚轮可继续加速（最高 12）
+// 隐藏功能：速度滑杆鼠标拖拽上限 3；在滑杆上滚动滚轮可继续加速（最高 12）
 // 纯 Canvas2D，动画 rAF + 前台画布重绘驱动；无 WebGL/Shader、无泛光、无曲率调节
 import { app } from "../../../scripts/app.js";
 
@@ -16,7 +16,7 @@ const T = {
     color: "颜色", colorFixed: "固定颜色",
     highlight: "连线高光", arrow: "方向箭头",
     flowSpeed: "速度", opacity: "透明度",
-    spdTip: "拖拽到最高后，按住鼠标中键滚动滚轮可继续加速",
+    spdTip: "拖拽到最高后，在滑杆上滚动滚轮可继续加速",
     width: "粗细", lang: "界面语言", reset: "重置默认",
     loaded: "LinkLite 已启用 ✓",
     auto: "自动", zh_l: "中文", en_l: "English",
@@ -36,7 +36,7 @@ const T = {
     color: "Color", colorFixed: "Fixed Color",
     highlight: "Highlight link", arrow: "Direction arrow",
     flowSpeed: "Speed", opacity: "Opacity",
-    spdTip: "Drag to max, then hold middle mouse button and scroll to go faster",
+    spdTip: "Drag to max, then scroll on the slider to go faster",
     width: "Width", lang: "Language", reset: "Reset defaults",
     loaded: "LinkLite loaded ✓",
     auto: "Auto", zh_l: "中文", en_l: "English",
@@ -1142,10 +1142,7 @@ function renderPanel() {
     <div id="lt-color-row" style="display:${cfg.colorMode === "fixed" ? "flex" : "none"};align-items:center;justify-content:flex-end;margin:4px 0">
       <input id="lt-color" type="color" value="${cfg.color}" style="padding:0;border:none;border-radius:4px;background:none;height:22px;width:44px">
     </div>
-    ${row(t.flowSpeed, `<span style="display:flex;align-items:center;gap:6px">
-      <input id="lt-range-speed" type="range" min="0.1" max="${SPEED_MAX}" step="0.1" value="${Math.min(SPEED_MAX, Number(cfg.flowSpeed) || 1)}" style="width:92px" title="${t.spdTip}">
-      <span id="lt-speed-val" style="width:34px;text-align:right;font-variant-numeric:tabular-nums;color:#9cc0ff">${(Number(cfg.flowSpeed) || 1).toFixed(1)}</span>
-    </span>`)}
+    ${row(t.flowSpeed, `<input id="lt-range-speed" type="range" min="0.1" max="${SPEED_MAX}" step="0.1" value="${Math.min(SPEED_MAX, Number(cfg.flowSpeed) || 1)}" style="width:126px" title="${t.spdTip}">`)}
     ${row(t.width, `<input id="lt-range-w" type="range" min="1" max="5" step="0.2" value="${cfg.width}" style="width:126px">`)}
     ${row(t.opacity, `<input id="lt-range-op" type="range" min="0.1" max="1" step="0.05" value="${cfg.opacity}" style="width:126px">`)}
     ${row(t.lang, `<select id="lt-sel-lang"><option value="auto" ${cfg.lang === "auto" ? "selected" : ""}>${t.auto}</option><option value="zh" ${cfg.lang === "zh" ? "selected" : ""}>${t.zh_l}</option><option value="en" ${cfg.lang === "en" ? "selected" : ""}>${t.en_l}</option></select>`)}
@@ -1158,29 +1155,21 @@ function renderPanel() {
   $("#lt-sel-arrow").onchange = (e) => setCfg({ arrow: e.target.checked }, true);
   $("#lt-sel-mode").onchange = (e) => { setCfg({ colorMode: e.target.value }); $("#lt-color-row").style.display = e.target.value === "fixed" ? "flex" : "none"; };
   $("#lt-color").oninput = (e) => setCfg({ color: e.target.value });
-  // 速度：鼠标拖拽最高 SPEED_MAX；隐藏功能——在滑杆上按住鼠标中键滚动滚轮可突破上限继续加速到 SPEED_HARD_MAX
-  const spdEl = $("#lt-range-speed"), spdVal = $("#lt-speed-val");
-  const paintSpeed = (v) => {
-    const n = Number(v) || 1;
-    spdVal.textContent = n.toFixed(1);
-    spdVal.style.color = n > SPEED_MAX ? "#ffb454" : "#9cc0ff";   // 超出滑杆范围时变色提示
-  };
-  paintSpeed(cfg.flowSpeed);
-  spdEl.oninput = (e) => {
-    const v = Math.min(SPEED_MAX, parseFloat(e.target.value) || 1);
-    setCfg({ flowSpeed: v }, false);
-    paintSpeed(v);
-  };
-  // 中键按下时阻止浏览器自动滚动，否则滚轮会被浏览器接管
+  // 速度：鼠标拖拽最高 SPEED_MAX；隐藏功能——在滑杆上滚动滚轮可突破上限继续加速到 SPEED_HARD_MAX
+  const spdEl = $("#lt-range-speed");
+  spdEl.oninput = (e) => setCfg({ flowSpeed: Math.min(SPEED_MAX, parseFloat(e.target.value) || 1) }, false);
+  // 中键（滚轮）点击时阻止浏览器自动滚动，避免滚轮事件被浏览器接管
   spdEl.addEventListener("mousedown", (e) => { if (e.button === 1) e.preventDefault(); });
+  // 隐藏功能：鼠标悬停在速度滑杆上滚动滚轮即可调速，且能突破滑杆拖拽上限继续加速到 SPEED_HARD_MAX。
+  // 注意：普通鼠标的滚轮就是中键，滚动时不会产生"中键按下"状态（e.buttons 不含 4），
+  // 所以不能用 e.buttons 判断中键，直接响应 wheel 即可。
   spdEl.addEventListener("wheel", (e) => {
-    if (!(e.buttons & 4)) return;   // 仅"中键按住"时生效，普通滚轮不干扰
+    if (e.buttons & 1) return;   // 左键正按住滑杆拖拽时忽略滚轮，避免数值跳变
     e.preventDefault();
     const cur = Number(cfg.flowSpeed) || 1;
     const v = Math.round(Math.max(0.1, Math.min(SPEED_HARD_MAX, cur + (e.deltaY < 0 ? 0.5 : -0.5))) * 10) / 10;
     setCfg({ flowSpeed: v }, false);
     spdEl.value = Math.min(SPEED_MAX, v);   // 超过滑杆上限时保持满格
-    paintSpeed(v);
   }, { passive: false });
   $("#lt-range-w").oninput = (e) => setCfg({ width: parseFloat(e.target.value) }, false);
   $("#lt-range-op").oninput = (e) => setCfg({ opacity: parseFloat(e.target.value) }, false);
