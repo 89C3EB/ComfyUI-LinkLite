@@ -9,11 +9,12 @@ A lightweight, minimal and reliable ComfyUI link-beautify extension **V1**. Pure
 ## 功能 | Features
 
 - **纯连线美化**：只改连线外观，不改任何节点逻辑。Pure link styling only.
-- **8 种连线形态 | 8 line styles**（走线参考 quick-connections，沿端口方向平滑滑出，不压节点面板）：
+- **9 种连线形态 | 9 line styles**（走线参考 quick-connections，沿端口方向平滑滑出，不压节点面板）：
   - **曲线** `Curve`（默认，曲率固定最高）/ **直线** `Straight` / **置底** `Understated`
   - **折线** `Linear`（取中间走廊正交）/ **贴板** `Board`（PCB 式圆角贴面板外侧边缘走线）/ **波浪** `Wave`
   - **弹性** `Elastic`：橡皮筋式，控制点随两端距离动态变化——离得越远弯度越大、越近平直，弯向偏向端口合方向
   - **避让** `Auto-avoid`：在由端点与所有节点盒坐标构成的 Hanan 网格上跑 A* 自动绕开中间节点，再用圆角化，复杂工作流友好
+  - **PCB 正交** `PCB orthogonal`：内置 comfyui-pcb 的 A* 正交路由引擎（桩点分配 / 同对 ribbon / 反编织车道分离），输出印刷电路板式圆角走线，复杂工作流下比「避让」更整齐；路由子模块位于 `js/pathing/`（MIT，© Vedran Aberle Tokić）
 - **连线动效 | 12 effects**，可在面板中自由切换（全部与线同色、无衬底、无白芯、可带渐隐拖尾）：
   - **流点** `Flow dots`、**水滴** `Water drop`、**箭头** `Arrow`（带更长的彗星式拖尾）、**彩带** `RGB`、**虚线** `Dash`、**脉动** `Pulse`、**彗星** `Comet`、**光环** `Ring`、**流星** `Meteor`、**流光** `Sweep`、**波纹** `Ripple`、**光子** `Photon`
   - 右上角**⚡ 设置面板**中选 **无** 即关闭特效（唯一开关，选中特效即持续流动，无「触发方式」）。
@@ -38,7 +39,12 @@ ComfyUI/
     └── ComfyUI-LinkLite/      ← 放到这里
         ├── __init__.py
         └── js/
-            └── linklite.js
+            ├── linklite.js
+            └── pathing/        ← 正交路由子模块（借自 comfyui-pcb，MIT）
+                ├── router.js
+                ├── registry.js
+                ├── trace.js
+                └── nudge.js
 ```
 
 然后**重启 ComfyUI**（前端最好 **Ctrl+F5 强刷**，避免旧缓存）。
@@ -58,7 +64,7 @@ Restart ComfyUI, force-refresh (**Ctrl+F5**), then look for the **⚡** button a
 
 ## 体积与性能 | Size & Performance
 
-- 全部代码**单个 JS 文件**，零 Python 后端逻辑，静默加载、无日志刷屏。
+- 代码以 `js/linklite.js` 为主，另含 `js/pathing/` 正交路由子模块（借自 comfyui-pcb，MIT，© Vedran Aberle Tokić）；零 Python 后端逻辑，静默加载、无日志刷屏。
 - **路径几何缓存**：走线结果、致密化路径、长度测量与命中 Path2D 均按「样式/粗细/缩放/端点/节点盒」签名缓存，静止帧**零重算**，多工作流大量连线依旧流畅。
 - **低开销动画**：空闲时由插件自有 rAF 循环按 16ms 节流置脏驱动重绘（≈60fps）；画面上无连线时不推帧，空图零开销。纯 Canvas2D 基础绘制（描边/圆弧/渐变），**不使用 shadowBlur、WebGL/Shader**，显存占用小。
 - 内存护栏：几何缓存超 1200 条自动清理，长时间运行不膨胀。
@@ -93,7 +99,7 @@ Single JS file, silent load, geometry cached (zero recompute when idle), idle rA
 
 ## 兼容性 | Compatibility
 
-采用「特性探测 + 可回退原方法」的方式覆写 `renderLinkDirect / renderLink / drawLink`，同时兼容经典 litegraph 与新渲染管线；某版本若方法不存在则自动退化为原始渲染，功能优雅降级。
+采用「特性探测 + 可回退原方法」的方式覆写 `renderLinkDirect / renderLink / drawLink`，同时兼容经典 litegraph 与新渲染管线；某版本若方法不存在则自动退化为原始渲染，功能优雅降级。在 ComfyUI 0.38 等新前端上，额外通过 `installLivePatch` 挂载到活管线 `pathRenderer.drawLink`，确保美化在新渲染架构（节点盒走廊 / PCB 正交）同样生效。
 
 ### ComfyUI 0.3.x 空闲推帧适配（V1 核心修复）
 
@@ -123,6 +129,7 @@ Single JS file, silent load, geometry cached (zero recompute when idle), idle rA
 ## Changelog
 
 - **V1**：适配 ComfyUI 0.3.x 渲染架构，修复空闲时特效卡顿/冻结（技术细节详见上方「兼容性 · 空闲推帧适配」）：新增 rAF 空闲推帧置脏（fg+bg）、`setDirty` 新方法名适配、`_links` Map 结构兼容、`g_liveCanvas` + `active_canvas` 真实画布跟踪、渲染循环保活；新增 `__LLDiag` / `__LLDBG` 诊断接口；新增速度隐藏上限（滑杆拖拽上限 3，滑杆上滚动滚轮可继续加速至 12）。
+- **（贡献）PCB 正交走线**：新增第 9 种连线形态「PCB 正交」，内置 comfyui-pcb 的 A* 正交路由引擎（`js/pathing/`，MIT © Vedran Aberle Tokić），并兼容 ComfyUI 0.38 活管线 `pathRenderer`；与 comfyui-pcb 共存时自动让其退场，避免双扩展抢同一渲染入口。
 - **V0.1**：连线形态与动效改为 2 字命名（动效改名为「连线动效」）；新增弹性曲线、正交避让两种走线；箭头拖尾加长；移除「触发方式」；路径几何缓存 + 低 GPU/显存优化。
 - V0.x 之前为开发版迭代（形态/特效增减、发光渲染重构、绝对速度相位修复、翻页缓存修复等）。
 

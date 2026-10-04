@@ -1,12 +1,18 @@
-// ComfyUI-LinkLite — 轻量连线美化插件 V1（适配 ComfyUI 0.3.x：Map _links / setDirty / 空闲推帧）
+// ComfyUI-LinkLite — 轻量连线美化插件（连线样式 + 内置 PCB 正交路由；适配 ComfyUI 0.38+ 活管线 pathRenderer）
 // 走线：节点盒"走廊"正交路由 + evenodd clip 挖孔(基线置于面板下方/贴边)，特效在 clip 之外绘制
-// 形态：曲线/直线/折线/贴板/波浪/置底/弹性/避让 共8种（曲线曲率固定为最高）
+// 形态：曲线/直线/折线/贴板/波浪/置底/弹性/避让/PCB正交 共9种（曲线曲率固定为最高）
 // 特效：水滴/流点/箭头/彩带/虚线/脉动/彗星/光环/流星/流光/波纹/光子（样本路径致密化，拐角同样生效）
 // 连线高光：勾选后，选中节点 → 下一个节点之间的连线加粗+2档、透明度+30%
 // 性能：路径几何缓存(静止帧零重算) + 空闲 rAF 推帧(16ms 节流置脏 fg+bg)，多工作流流畅、GPU/显存占用小
 // 隐藏功能：速度滑杆鼠标拖拽上限 3；在滑杆上滚动滚轮可继续加速（最高 12）
 // 纯 Canvas2D，动画 rAF + 前台画布重绘驱动；无 WebGL/Shader、无泛光、无曲率调节
 import { app } from "../../../scripts/app.js";
+import { beginFrame, routeFor } from "./pathing/registry.js";
+import { emit } from "./pathing/trace.js";
+// 与 comfyui-pcb 的共存：本扩展内置了 pcb 的正交路由引擎，二者都会 monkeypatch
+// 同一个 pathRenderer。若 comfyui-pcb 已安装，我们在 installLivePatch 里检测它的全局
+// 标记 window.__pcb 并置位 window.__cablemanagementPathing，让 pcb 自动 stand down，
+// 避免双扩展冲突。注意：仅当 pcb 真正存在时才置位，未安装 pcb 的用户不受影响。
 
 /* ---------------- 文案（中英双语） ---------------- */
 const T = {
@@ -22,7 +28,7 @@ const T = {
     auto: "自动", zh_l: "中文", en_l: "English",
     st_curve: "曲线", st_straight: "直线", st_linear: "折线",
     st_board: "贴板", st_wave: "波浪", st_under: "置底",
-    st_elastic: "弹性", st_ortho: "避让",
+    st_elastic: "弹性", st_ortho: "避让", st_pcb: "PCB正交",
     fx_none: "无", fx_dots: "流点", fx_spider: "水滴", fx_arrow: "箭头",
     fx_rgb: "彩带", fx_dash: "虚线", fx_pulse: "脉动",
     fx_comet: "彗星", fx_ring: "光环",
@@ -42,7 +48,7 @@ const T = {
     auto: "Auto", zh_l: "中文", en_l: "English",
     st_curve: "Curve", st_straight: "Straight", st_linear: "Linear",
     st_board: "Orthogonal", st_wave: "Wave", st_under: "Understated",
-    st_elastic: "Elastic", st_ortho: "Auto-avoid",
+    st_elastic: "Elastic", st_ortho: "Auto-avoid", st_pcb: "PCB Ortho",
     fx_none: "None", fx_dots: "Flow dots", fx_spider: "Water drop", fx_arrow: "Arrow",
     fx_rgb: "RGB", fx_dash: "Dash flow", fx_pulse: "Pulse",
     fx_comet: "Comet", fx_ring: "Energy Ring",
@@ -54,7 +60,7 @@ const T = {
 
 /* ---------------- 配置 ---------------- */
 const KEY = "comfyui.linklite.v6";
-const STYLES = ["curve", "straight", "linear", "board", "wave", "under", "elastic", "ortho"];
+const STYLES = ["curve", "straight", "linear", "board", "wave", "under", "elastic", "ortho", "pcb"];
 const FXS = ["none", "spider", "dots", "arrow", "rgb", "dash", "pulse", "comet", "ring", "meteor", "sweep", "ripple", "photon"];
 const CURVE_MAX = 1.6;               // 曲线曲率固定为最高
 const HL_WIDTH_LIFT = 1;               // 连线高光：粗细 +1 档（含蓄，仅比普通线略粗）
@@ -111,6 +117,21 @@ function getDirs(rest, a, b) {
   const dx = b[0] - a[0], dy = b[1] - a[1];
   if (Math.abs(dx) >= Math.abs(dy)) { dS = dx >= 0 ? 4 : 3; dE = dx >= 0 ? 3 : 4; }
   else { dS = dy >= 0 ? 2 : 1; dE = dy >= 0 ? 1 : 2; }
+  return { dS, dE };
+}
+// 把 0.38 活管线 drawLink 传入的 linkData（startDirection/endDirection 为字符串码
+// right/left/up/down/none）转换为 LinkLite 的 {dS,dE} 整数方向，供 outset/buildPts 使用。
+function linkDirs(linkData) {
+  const map = { right: 4, left: 3, down: 2, up: 1 };
+  let dS = map[linkData.startDirection] || 0;
+  let dE = map[linkData.endDirection] || 0;
+  if (!dS || !dE) {
+    const a = [linkData.startPoint.x, linkData.startPoint.y];
+    const b = [linkData.endPoint.x, linkData.endPoint.y];
+    const r = getDirs([], a, b);
+    if (!dS) dS = r.dS;
+    if (!dE) dE = r.dE;
+  }
   return { dS, dE };
 }
 function unitOut(d, ax, ay, bx, by) {
@@ -787,6 +808,74 @@ function clipOutNodes(ctx, nodes) {
   try { ctx.clip("evenodd"); return true; } catch (e) { return false; }
 }
 
+// 通用描边：给定一条已算好的折线 pts，完成 基线 + 高光 + 动效 + 箭头 + 挖孔 + 命中 Path2D。
+// basePath 非空时（pcb 正交走线），基线用圆角 Path2D 描边，其余（动效/箭头）仍基于 pts。
+function strokeStyledWithPts(ctx, pts, link, c, scale, canvas, basePath) {
+  if (!pts || pts.length < 2) return false;
+  try {
+    if (typeof window !== "undefined") {
+      const dbg = window.__LLDBG || (window.__LLDBG = { styled: 0, last: 0, dt: [], push: 0 });
+      const t = performance.now();
+      if (dbg.last) { dbg.dt.push(Math.round(t - dbg.last)); if (dbg.dt.length > 40) dbg.dt.shift(); }
+      dbg.last = t; dbg.styled++;
+    }
+  } catch (e) {}
+  const col = linkColor(canvas, link, c);
+  const active = true;
+  const hl = c.highlight && isChannelSelected(canvas, link);
+  const op = Math.max(0.05, Math.min(1, c.opacity || 1));
+  const time = performance.now() / 1000;
+  const w = Math.max(1, c.width * scale);
+  ctx.save();
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  const nodes = linkNodes(canvas, link);
+  if (c.clipNodes) clipOutNodes(ctx, nodes);
+  const baseW = c.style === "under" ? w * 0.9 : w;
+  const baseA = op * (c.style === "under" ? 0.55 : 1);
+  const strokeW = hl ? (c.width + HL_WIDTH_LIFT) * scale : baseW;
+  const strokeA = hl ? Math.min(1, baseA + HL_ALPHA_LIFT) : baseA;
+  ctx.strokeStyle = col;
+  ctx.globalAlpha = strokeA;
+  ctx.lineWidth = strokeW;
+  if (basePath) ctx.stroke(basePath); else strokePath(ctx, pts);
+  if (hl) {
+    ctx.globalCompositeOperation = "source-over";
+    ctx.strokeStyle = col;
+    ctx.lineWidth = strokeW + 3 * scale; ctx.globalAlpha = 0.10 * strokeA; if (basePath) ctx.stroke(basePath); else strokePath(ctx, pts);
+    ctx.lineWidth = strokeW + 1.4 * scale; ctx.globalAlpha = 0.18 * strokeA; if (basePath) ctx.stroke(basePath); else strokePath(ctx, pts);
+    ctx.lineWidth = strokeW; ctx.globalAlpha = strokeA; if (basePath) ctx.stroke(basePath); else strokePath(ctx, pts);
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = Math.max(1, strokeW * 0.55); ctx.globalAlpha = 0.32 * strokeA; if (basePath) ctx.stroke(basePath); else strokePath(ctx, pts);
+  }
+  ctx.setLineDash([]);
+  ctx.restore();
+  if (active && c.fx && c.fx !== "none") {
+    const fpts = densify(pts, 4);
+    const mm = measure(fpts);
+    ctx.setLineDash([]);
+    switch (c.fx) {
+      case "dots": fxDots(ctx, fpts, c, time, col, w, op, mm); break;
+      case "spider": fxSpider(ctx, fpts, c, time, col, w, op, mm); break;
+      case "arrow": fxArrowRun(ctx, fpts, c, time, col, w, scale, op, mm); break;
+      case "rgb": fxRgb(ctx, fpts, c, time, w, op); break;
+      case "dash": fxDash(ctx, fpts, c, time, col, w, op); break;
+      case "pulse": fxPulse(ctx, fpts, c, time, col, w, scale, op, mm); break;
+      case "comet": fxComet(ctx, fpts, c, time, col, w, op, mm); break;
+      case "ring": fxRing(ctx, fpts, c, time, col, w, op, mm); break;
+      case "meteor": fxMeteor(ctx, fpts, c, time, col, w, op, mm); break;
+      case "sweep": fxSweep(ctx, fpts, c, time, col, w, op, mm); break;
+      case "ripple": fxRipple(ctx, fpts, c, time, col, w, op, mm); break;
+      case "photon": fxPhoton(ctx, fpts, c, time, col, w, op, mm); break;
+    }
+  }
+  if (c.arrow && active) drawArrow(ctx, pts, scale, col);
+  if (link && typeof link === "object") {
+    try { link.path = basePath ? basePath : ptsToPath2D(pts); } catch (e) {}
+  }
+  return true;
+}
+
 function drawStyled(canvas, ctx, a, b, link, c, scale, dirs) {
   // 总开关：关闭「启用」时不再接管渲染，回退给 ComfyUI 原始画线（特效/高光/样式全部不生效）
   if (!c || !c.enabled) return false;
@@ -1011,6 +1100,133 @@ function installPatch() {
   return true;
 }
 
+/* ---------------- 活管线接入（ComfyUI 0.38+）：pathRenderer.drawLink ---------------- */
+// 0.38 的渲染循环已改为 drawConnections -> linkRenderer.renderLinkDirect ->
+// pathRenderer.drawLink -> drawLinkPath。LinkLite V1 钩的是已废弃的 LGraphCanvas.prototype
+// renderLink/renderLinkDirect，所以在 0.38 上根本不触发。这里照搬 comfyui-pcb 的挂钩手法，
+// 把 LinkLite 渲染挂到活管线上，并内置 pcb 正交路由引擎（routeFor + emit）。
+let livePatched = false, livePatchTries = 0, livePatchTimer = null;
+function installLivePatch() {
+  const c = app.canvas;
+  if (!c || !c.linkRenderer || !c.linkRenderer.pathRenderer) return false;
+  // 若 comfyui-pcb 已安装，请它退场以免两个扩展抢同一个 pathRenderer。
+  // 通过 pcb 自身的全局标记 window.__pcb（pcb 在模块加载时设置）判定其是否存在；
+  // 仅当 pcb 真实存在时才置位 __cablemanagementPathing，未装 pcb 的用户不受影响。
+  if (window.__pcb) window.__cablemanagementPathing = true;
+  const canvasProto = c.constructor.prototype;
+  const prProto = Object.getPrototypeOf(c.linkRenderer.pathRenderer);
+
+  // 每帧抓障碍快照：pcb 路由引擎依赖 beginFrame 填充 obstacles，缺失会导致 trivial 误判
+  // 让所有线退回直线（这就是上一版"全变直线"的根因之一）。
+  const origDrawConnections = canvasProto.drawConnections;
+  canvasProto.drawConnections = function (ctx) {
+    if (this === app.canvas && cfg.enabled) {
+      try { beginFrame(this); } catch (e) { console.warn("linklite: beginFrame failed", e); }
+    }
+    return origDrawConnections.call(this, ctx);
+  };
+
+  // drawLink：按当前样式算几何，挂到 linkData.__llGeo；pcb 形态走 routeFor 正交路由。
+  const origDrawLink = prProto.drawLink;
+  prProto.drawLink = function (ctx, linkData, context) {
+    if (cfg.enabled && linkData && linkData.startPoint && linkData.endPoint &&
+        linkData.id !== "temp" && linkData.id !== "dragging") {
+      try {
+        if (cfg.style === "pcb") {
+          const r = routeFor(app.canvas, linkData);
+          if (r && r.pts && r.pts.length >= 2) {
+            linkData.__llGeo = { pts: r.pts, pcb: true };
+          } else {
+            // trivial（水平相邻无障碍）：pcb 放行成直线。这里仍用 LinkLite 样式画一条直连线，
+            // 避免退回 core 默认线，保证整体观感统一。
+            linkData.__llGeo = {
+              pts: [[linkData.startPoint.x, linkData.startPoint.y], [linkData.endPoint.x, linkData.endPoint.y]],
+              pcb: false,
+            };
+          }
+        } else {
+          const a = [linkData.startPoint.x, linkData.startPoint.y];
+          const b = [linkData.endPoint.x, linkData.endPoint.y];
+          const dirs = linkDirs(linkData);
+          const scale = getScale(app.canvas);
+          const w = Math.max(1, cfg.width * scale);
+          const nodes = linkNodes(app.canvas, linkData);
+          const geo = getGeo(app.canvas, linkData, a, b, cfg, dirs, w, scale, nodes);
+          linkData.__llGeo = geo ? { pts: geo.pts } : null;
+        }
+      } catch (e) {
+        linkData.__llGeo = null;
+      }
+    }
+    return origDrawLink.call(this, ctx, linkData, context);
+  };
+
+  // drawLinkPath：唯一的描边点。pcb 形态用 emit 生成圆角 Path2D 描边；其余用折线描边。
+  // 全部复用 LinkLite 的 基线/高光/动效/箭头/挖孔 渲染，使 9 种形态在活管线全部生效。
+  const origDrawLinkPath = prProto.drawLinkPath;
+  prProto.drawLinkPath = function (ctx, path, link, context, lineWidth, color) {
+    if (!link || !link.__llGeo) return origDrawLinkPath.call(this, ctx, path, link, context, lineWidth, color);
+    let basePath = null;
+    if (link.__llGeo.pcb) {
+      try { basePath = new Path2D(); emit(basePath, link.__llGeo.pts); } catch (e) {}
+    }
+    const scale = getScale(app.canvas);
+    strokeStyledWithPts(ctx, link.__llGeo.pts, link, cfg, scale, app.canvas, basePath);
+    // 静音/打断按钮落在最长直段中点（与 pcb 一致）
+    const pts = link.__llGeo.pts;
+    let bi = 1, bl = -1;
+    for (let k = 1; k < pts.length; k++) {
+      const l = Math.abs(pts[k][0] - pts[k - 1][0]) + Math.abs(pts[k][1] - pts[k - 1][1]);
+      if (l > bl) { bl = l; bi = k; }
+    }
+    try {
+      const aa = pts[bi - 1], bb = pts[bi];
+      link.centerPos = { x: (aa[0] + bb[0]) / 2, y: (aa[1] + bb[1]) / 2 };
+      link.centerAngle = Math.atan2(bb[1] - aa[1], bb[0] - aa[0]);
+    } catch (e) {}
+    return path;
+  };
+
+  // 中心按钮位置：与上面的 drawLinkPath 保持一致，使用 __llGeo 的最长直段中点。
+  const origCentre = prProto.calculateCenterPoint;
+  prProto.calculateCenterPoint = function (link, context) {
+    if (!link || !link.__llGeo) return origCentre.call(this, link, context);
+    const pts = link.__llGeo.pts;
+    let bi = 1, bl = -1;
+    for (let k = 1; k < pts.length; k++) {
+      const l = Math.abs(pts[k][0] - pts[k - 1][0]) + Math.abs(pts[k][1] - pts[k - 1][1]);
+      if (l > bl) { bl = l; bi = k; }
+    }
+    const aa = pts[bi - 1], bb = pts[bi];
+    link.centerPos = { x: (aa[0] + bb[0]) / 2, y: (aa[1] + bb[1]) / 2 };
+    link.centerAngle = Math.atan2(bb[1] - aa[1], bb[0] - aa[0]);
+  };
+
+  return true;
+}
+function ensureLivePatch() {
+  if (livePatched) return;
+  try { livePatched = installLivePatch(); } catch (e) { console.warn("[LinkLite V2] live patch error", e); }
+  if (livePatched) {
+    console.info("%c[LinkLite V2] %c活管线 pathRenderer 已接管 / live pipeline hooked（pcb 正交路由 + 全部 LinkLite 样式）",
+      "color:#7aa6ff", "color:#888");
+    if (livePatchTimer) { clearInterval(livePatchTimer); livePatchTimer = null; }
+    return;
+  }
+  if (livePatchTries === 0) {
+    livePatchTimer = setInterval(() => {
+      try { livePatched = installLivePatch(); } catch (e) {}
+      if (livePatched) {
+        clearInterval(livePatchTimer); livePatchTimer = null;
+        console.info("%c[LinkLite V2] %c活管线已接管（延迟）", "color:#7aa6ff", "color:#888");
+      } else if (++livePatchTries === 50) {
+        clearInterval(livePatchTimer); livePatchTimer = null;
+        console.warn("[LinkLite V2] 未找到 pathRenderer 挂钩点，本次未启用");
+      }
+    }, 200);
+  }
+}
+
 /* ---------------- 动画循环：空闲恒定推帧 ---------------- */
 let rafStarted = false;
 
@@ -1116,7 +1332,7 @@ function renderPanel() {
   const stOpts = [
     ["curve", t.st_curve], ["straight", t.st_straight], ["linear", t.st_linear],
     ["board", t.st_board], ["wave", t.st_wave], ["under", t.st_under],
-    ["elastic", t.st_elastic], ["ortho", t.st_ortho],
+    ["elastic", t.st_elastic], ["ortho", t.st_ortho], ["pcb", t.st_pcb],
   ];
   const fxOpts = [
     ["none", t.fx_none], ["spider", t.fx_spider], ["dots", t.fx_dots], ["arrow", t.fx_arrow],
@@ -1207,13 +1423,7 @@ function showButton() { ensureButton(); btn.title = tr().title + "  V1"; }
 app.registerExtension({
   name: "ComfyUI.LinkLite",
   async setup() {
-    const patched = installPatch();
-    if (patched) {
-      console.info("%c[LinkLite V1] %c已加载 / loaded (%c0.3.x 空闲推帧已修复：setDirty + Map _links)",
-        "color:#7aa6ff", "color:#888", "color:#7cf0a0");
-    } else {
-      console.warn("[LinkLite V1] 未能接入渲染管线（renderLink / renderLinkDirect / drawLink 均不存在），本次未启用（不影响其他功能）");
-    }
+    ensureLivePatch();   // 0.38+：挂活管线 pathRenderer，内置 pcb 正交路由
     ensureAnim();
     showButton();
     showBadge();
